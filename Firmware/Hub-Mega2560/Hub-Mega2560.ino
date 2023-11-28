@@ -574,11 +574,12 @@ void setupCOM() {
         break;   
     case MODE_LYNX:
         // Setup Serial 2 on pins 16/17
-        Serial2.begin(62500, SERIAL_8N2);   // Lynx comm (Bauds 62500, 41666, 9600)
+        Serial1.begin(62500, SERIAL_8N2); // recv // Lynx comm (Bauds 62500, 41666, 9600)
+        Serial2.begin(62500, SERIAL_8O1); // send // Lynx comm (Bauds 62500, 41666, 9600)
         while (!Serial2) { }
-        Serial2.setTimeout(30);
+        Serial1.setTimeout(30);
         Serial2.flush();
-        Serial2.readString();
+        Serial1.readString();
         break;
     case MODE_NES:
         pinMode(18, INPUT_PULLUP); // STROBE (PC)
@@ -854,62 +855,27 @@ void c64Interrupt() {
 //     LYNX Communication     //
 ////////////////////////////////
 
-unsigned char lynxBitPeriod = 16;   // Bauds: 62500=16 / 41666=24 / 9600=104
-unsigned long lynxTimer;
-
 void lynxOutputMode(void) {
-    // Switch pin to output
-    PORTD |= B00000100;
-    DDRD |= B00000100;
-    lynxTimer = micros();  
-    while (micros()-lynxTimer < lynxBitPeriod);
+  // Switch pin to output ... 
+  // with diode this is nop
 }
 
 void lynxInputMode(void) {
+    Serial2.flush(); // wait until everything send
     // Switch pin to input
-    DDRD &= B11111011;  
+  // with diode this is nop
 }
 
 void lynxWrite(char value) {
-    unsigned char i, parity = 0, mask = 1;
-
-    // Start Bit
-    PORTD &= B11111011;
-    lynxTimer += lynxBitPeriod; while (micros()-lynxTimer < lynxBitPeriod) ;
-
-    // Value Bits
-    for (i=0; i<8; i++) {
-        if (value & mask) { 
-            PORTD |= B00000100;
-            parity++;
-        } else { 
-            PORTD &= B11111011;
-        }
-          mask = mask << 1;
-          lynxTimer += lynxBitPeriod; while (micros()-lynxTimer < lynxBitPeriod) ;
-    }
-      
-    // Parity Bit
-    if (parity % 2) {
-        PORTD &= B11111011;
-    } else {
-        PORTD |= B00000100;
-    }
-    lynxTimer += lynxBitPeriod; while (micros()-lynxTimer < lynxBitPeriod) ; 
-
-    // Stop Bit
-    PORTD |= B00000100;
-    for (i=0; i<6; i++) {   // Bauds: 41666,62500 = i<6 / 9600 = i<1
-        lynxTimer += lynxBitPeriod; while (micros()-lynxTimer < lynxBitPeriod) ;
-    }
+  Serial2.write(value);
 }
 
 void lynxProcessCOM() {  
     // Have we got data?
-    if (!Serial2.available()) { comCode = COM_ERR_NODATA; return; }
+    if (!Serial1.available()) { comCode = COM_ERR_NODATA; return; }
 
     // Get Header
-    if (!Serial2.readBytes((unsigned char*)&comInHeader, 1)) { comCode = COM_ERR_HEADER; return; }
+    if (!Serial1.readBytes((unsigned char*)&comInHeader, 1)) { comCode = COM_ERR_HEADER; return; }
   #ifdef __DEBUG_IO__  
     inRec++;
   #endif
@@ -918,7 +884,7 @@ void lynxProcessCOM() {
     if (comInHeader != 170 && comInHeader != 85) { comCode = COM_ERR_HEADER; return; }
     
     // Get Command
-    if (!Serial2.readBytes((unsigned char*)&comInCMD, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+    if (!Serial1.readBytes((unsigned char*)&comInCMD, 1)) { comCode = COM_ERR_TRUNCAT; return; }
   #ifdef __DEBUG_IO__  
     inRec++;
   #endif
@@ -926,7 +892,7 @@ void lynxProcessCOM() {
     // Send or Receive?
     if (comInHeader == 85) {
         // Get RecvID
-        if (!Serial2.readBytes((unsigned char*)&comInID, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+        if (!Serial1.readBytes((unsigned char*)&comInID, 1)) { comCode = COM_ERR_TRUNCAT; return; }
       #ifdef __DEBUG_IO__  
         inRec++;
       #endif
@@ -947,13 +913,13 @@ void lynxProcessCOM() {
 
     } else {
         // Get Length
-        if (!Serial2.readBytes((unsigned char*)&comInLen, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+        if (!Serial1.readBytes((unsigned char*)&comInLen, 1)) { comCode = COM_ERR_TRUNCAT; return; }
       #ifdef __DEBUG_IO__  
         inRec++;
       #endif
     
         // Get Buffer+Checksum
-        if (!Serial2.readBytes((unsigned char*)comInBuffer, comInLen+1)) { comCode = COM_ERR_TRUNCAT; return; }
+        if (!Serial1.readBytes((unsigned char*)comInBuffer, comInLen+1)) { comCode = COM_ERR_TRUNCAT; return; }
       #ifdef __DEBUG_IO__  
         inRec += comInLen+1;
       #endif
@@ -976,8 +942,8 @@ void lynxProcessCOM() {
 
     // Return pin to input and clear data sent to self
     lynxInputMode();
-    while (Serial2.available())
-        Serial2.read(); 
+    while (Serial1.available())
+        Serial1.read(); 
 }
 
 /////////////////////////////////
