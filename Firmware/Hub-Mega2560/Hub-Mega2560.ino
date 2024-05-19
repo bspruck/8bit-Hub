@@ -93,9 +93,12 @@ const char* fail  = "Update failed!      ";
 #define MODE_C64   4
 #define MODE_NES   5
 #define MODE_ORIC  6
-#define MODE_LYNX  7
-#define HUB_MODES  8
-const char* modeString[HUB_MODES] = {"Please setup", "Apple //", "Atari 8bit", "BBC Micro", "C64/C128", "NES", "Oric", "Lynx"};
+#define MODE_LYNXOLD  7
+#define MODE_LYNXNEW  8
+#define HUB_MODES  9
+const char* modeString[HUB_MODES] = {
+	"Please setup", "Apple //", "Atari 8bit", "BBC Micro", "C64/C128", "NES", "Oric",
+	"Lynx(old)", "Lynx(new)"};
 byte hubMode = MODE_NONE;
 
 // COMM Params
@@ -550,6 +553,10 @@ volatile unsigned long interruptTimer = 0;
   unsigned long timerIO = millis();
 #endif
     
+// For Lynx(new), we use two interfaces and name them according to function
+#define LynxSerialRecv  Serial1
+#define LynxSerialSend  Serial2
+
 void setupCOM() {
     // Setup COM Connection
     switch (hubMode) {
@@ -572,13 +579,25 @@ void setupCOM() {
         PORTH &= ~_BV(PH1);        // Pin 16 LOW == READY   
         attachInterrupt(digitalPinToInterrupt(18), c64Interrupt, FALLING);    
         break;   
-    case MODE_LYNX:
+    case MODE_LYNXOLD:
         // Setup Serial 2 on pins 16/17
         Serial2.begin(62500, SERIAL_8N2);   // Lynx comm (Bauds 62500, 41666, 9600)
         while (!Serial2) { }
         Serial2.setTimeout(30);
         Serial2.flush();
         Serial2.readString();
+        break;
+    case MODE_LYNXNEW:
+        // Issue with parity:
+        // In the hub code on the lynx, parity for receiving is checked!
+        // But the Lynx cannot create correct parity.
+        // The code here cannot use different setting for send and recv in one interface
+        // Thus we need two to make it workin hardware
+        LynxSerialRecv.begin(62500, SERIAL_8N2); // recv // Lynx comm (Bauds 62500, 41666, 9600)
+        LynxSerialSend.begin(62500, SERIAL_8O1); // send // Lynx comm (Bauds 62500, 41666, 9600)
+        LynxSerialRecv.setTimeout(30);
+        LynxSerialSend.flush();
+        LynxSerialRecv.readString();// why need readstring?
         break;
     case MODE_NES:
         pinMode(18, INPUT_PULLUP); // STROBE (PC)
@@ -851,26 +870,26 @@ void c64Interrupt() {
 }
 
 ////////////////////////////////
-//     LYNX Communication     //
+//   LYNX Communication (old) //
 ////////////////////////////////
 
 unsigned char lynxBitPeriod = 16;   // Bauds: 62500=16 / 41666=24 / 9600=104
 unsigned long lynxTimer;
 
-void lynxOutputMode(void) {
+void lynxOldOutputMode(void) {
     // Switch pin to output
     PORTD |= B00000100;
     DDRD |= B00000100;
-    lynxTimer = micros();  
+    lynxTimer = micros();
     while (micros()-lynxTimer < lynxBitPeriod);
 }
 
-void lynxInputMode(void) {
+void lynxOldInputMode(void) {
     // Switch pin to input
     DDRD &= B11111011;  
 }
 
-void lynxWrite(char value) {
+void lynxOldWrite(char value) {
     unsigned char i, parity = 0, mask = 1;
 
     // Start Bit
@@ -904,13 +923,13 @@ void lynxWrite(char value) {
     }
 }
 
-void lynxProcessCOM() {  
+void lynxOldProcessCOM() {
     // Have we got data?
     if (!Serial2.available()) { comCode = COM_ERR_NODATA; return; }
 
     // Get Header
     if (!Serial2.readBytes((unsigned char*)&comInHeader, 1)) { comCode = COM_ERR_HEADER; return; }
-  #ifdef __DEBUG_IO__  
+  #ifdef __DEBUG_IO__
     inRec++;
   #endif
 
@@ -919,7 +938,7 @@ void lynxProcessCOM() {
     
     // Get Command
     if (!Serial2.readBytes((unsigned char*)&comInCMD, 1)) { comCode = COM_ERR_TRUNCAT; return; }
-  #ifdef __DEBUG_IO__  
+  #ifdef __DEBUG_IO__
     inRec++;
   #endif
 
@@ -927,7 +946,7 @@ void lynxProcessCOM() {
     if (comInHeader == 85) {
         // Get RecvID
         if (!Serial2.readBytes((unsigned char*)&comInID, 1)) { comCode = COM_ERR_TRUNCAT; return; }
-      #ifdef __DEBUG_IO__  
+      #ifdef __DEBUG_IO__
         inRec++;
       #endif
 
@@ -937,47 +956,143 @@ void lynxProcessCOM() {
                 
         // Send DATA
         //delayMicroseconds(6*lynxBitPeriod);   // Bauds: 62500=6* / 41666=8* / 9600=2*
-        lynxOutputMode();
+        lynxOldOutputMode();
         for (unsigned char i=0; i<comOutLen; i++) {
-            lynxWrite(comOutBuffer[i]);
-          #ifdef __DEBUG_IO__  
+            lynxOldWrite(comOutBuffer[i]);
+          #ifdef __DEBUG_IO__
             outRec++;
-          #endif            
-        }          
+          #endif
+        }
 
     } else {
         // Get Length
         if (!Serial2.readBytes((unsigned char*)&comInLen, 1)) { comCode = COM_ERR_TRUNCAT; return; }
-      #ifdef __DEBUG_IO__  
+      #ifdef __DEBUG_IO__
         inRec++;
       #endif
     
         // Get Buffer+Checksum
         if (!Serial2.readBytes((unsigned char*)comInBuffer, comInLen+1)) { comCode = COM_ERR_TRUNCAT; return; }
-      #ifdef __DEBUG_IO__  
+      #ifdef __DEBUG_IO__
         inRec += comInLen+1;
       #endif
 
         // Check Data Integrity
-        if (checkPacket()) {        
+        if (checkPacket()) {
             // Send ACKNOW and process CMD
-            lynxOutputMode();
-            lynxWrite(85);
+            lynxOldOutputMode();
+            lynxOldWrite(85);
             comProcessCMD();
         } else {
             // Send NG
-            lynxOutputMode();
-            lynxWrite(0);  
+            lynxOldOutputMode();
+            lynxOldWrite(0);
         }
-      #ifdef __DEBUG_IO__  
+      #ifdef __DEBUG_IO__
         outRec++;
-      #endif            
+      #endif
     }
 
     // Return pin to input and clear data sent to self
-    lynxInputMode();
+    lynxOldInputMode();
     while (Serial2.available())
         Serial2.read(); 
+}
+
+////////////////////////////////
+//   LYNX Communication (new) //
+////////////////////////////////
+
+
+void lynxNewOutputMode(void) {
+  // Switch pin to output ...
+  // with diode this is nop
+}
+
+void lynxNewInputMode(void) {
+  LynxSerialSend.flush(); // wait until everything send
+  // Switch pin to input
+  // with diode this is nop
+}
+
+void lynxNewWrite(char value) {
+  LynxSerialSend.write(value);
+}
+
+void lynxNewProcessCOM() {
+    // Have we got data?
+    if (!LynxSerialRecv.available()) { comCode = COM_ERR_NODATA; return; }
+
+    // Get Header
+    if (!LynxSerialRecv.readBytes((unsigned char*)&comInHeader, 1)) { comCode = COM_ERR_HEADER; return; }
+  #ifdef __DEBUG_IO__
+    inRec++;
+  #endif
+
+    // Check Header
+    if (comInHeader != 170 && comInHeader != 85) { comCode = COM_ERR_HEADER; return; }
+
+    // Get Command
+    if (!LynxSerialRecv.readBytes((unsigned char*)&comInCMD, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+  #ifdef __DEBUG_IO__
+    inRec++;
+  #endif
+
+    // Send or Receive?
+    if (comInHeader == 85) {
+        // Get RecvID
+        if (!LynxSerialRecv.readBytes((unsigned char*)&comInID, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+      #ifdef __DEBUG_IO__
+        inRec++;
+      #endif
+
+        // Process packets
+        popPacket(comInID);
+        preparePacket();
+
+        // Send DATA
+        //delayMicroseconds(6*lynxBitPeriod);   // Bauds: 62500=6* / 41666=8* / 9600=2*
+        lynxNewOutputMode();
+        for (unsigned char i=0; i<comOutLen; i++) {
+            lynxNewWrite(comOutBuffer[i]);
+          #ifdef __DEBUG_IO__
+            outRec++;
+          #endif
+        }
+
+    } else {
+        // Get Length
+        if (!LynxSerialRecv.readBytes((unsigned char*)&comInLen, 1)) { comCode = COM_ERR_TRUNCAT; return; }
+      #ifdef __DEBUG_IO__
+        inRec++;
+      #endif
+
+        // Get Buffer+Checksum
+        if (!LynxSerialRecv.readBytes((unsigned char*)comInBuffer, comInLen+1)) { comCode = COM_ERR_TRUNCAT; return; }
+      #ifdef __DEBUG_IO__
+        inRec += comInLen+1;
+      #endif
+
+        // Check Data Integrity
+        if (checkPacket()) {
+            // Send ACKNOW and process CMD
+            lynxNewOutputMode();
+            lynxNewWrite(85);
+            comProcessCMD();
+        } else {
+            // Send NG
+            lynxNewOutputMode();
+            lynxNewWrite(0);
+        }
+      #ifdef __DEBUG_IO__
+        outRec++;
+      #endif
+    }
+
+    // Return pin to input and clear data sent to self
+    lynxNewInputMode();
+    while (LynxSerialRecv.available())
+        LynxSerialRecv.read();
 }
 
 /////////////////////////////////
@@ -2537,9 +2652,13 @@ void loop() {
         espProcessCMD();
 
     // Process COM I/O
-    if (hubMode == MODE_LYNX) {
+    if (hubMode == MODE_LYNXOLD) {
         // Process Lynx Communication (asynchronously)
-        lynxProcessCOM();      
+        lynxOldProcessCOM();
+    } else
+    if (hubMode == MODE_LYNXNEW) {
+        // Process Lynx Communication (asynchronously)
+        lynxNewProcessCOM();
     } else    
     if (hubMode == MODE_ATARI || hubMode == MODE_C64 || hubMode == MODE_NES || hubMode == MODE_ORIC) {
         // Check if data burst stalled (allow extra time for VBI/DLI interrupts)
